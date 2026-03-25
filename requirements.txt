@@ -1,0 +1,12 @@
+pytest
+pytest-json-report
+requests
+ultralytics
+pandas
+chromadb
+sentence-transformers
+numpy
+opencv-python
+fastapi
+uvicorn
+python-dotenv

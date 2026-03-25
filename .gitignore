@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Unit test / coverage reports
+.pytest_cache/
+test_results_*.json
+test_results.json
+
+# OS X junk
+.DS_Store
