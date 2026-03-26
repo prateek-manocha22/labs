@@ -1,0 +1,28 @@
+# 🎓 GEN-AI Hackathon 2026: Core Dependencies
+
+# --- Lab Autograding & Testing ---
+pytest
+pytest-json-report
+
+# --- Core AI & Data Processing ---
+requests
+numpy
+pandas
+matplotlib
+python-dotenv
+pydantic
+
+# --- Computer Vision (Traffic AI) ---
+ultralytics
+opencv-python
+
+# --- RAG & Agentic Workflows ---
+chromadb
+sentence-transformers
+fastapi
+uvicorn
+
+# --- Optional / API Helpers ---
+# openai
+# langchain
+# anthropic
