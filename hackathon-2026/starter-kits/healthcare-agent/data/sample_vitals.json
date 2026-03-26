@@ -1,0 +1,5 @@
+[
+    {"patient_id": "P001", "timestamp": "2026-03-26T10:00:00", "heart_rate": 72, "blood_pressure_sys": 120, "blood_pressure_dia": 80, "oxygen": 98},
+    {"patient_id": "P001", "timestamp": "2026-03-26T10:05:00", "heart_rate": 115, "blood_pressure_sys": 145, "blood_pressure_dia": 95, "oxygen": 92},
+    {"patient_id": "P002", "timestamp": "2026-03-26T10:00:00", "heart_rate": 65, "blood_pressure_sys": 115, "blood_pressure_dia": 75, "oxygen": 99}
+]

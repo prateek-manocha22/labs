@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+requests
+python-dotenv
+# langchain (optional, uncomment to use)
+# openai (optional, uncomment to use)
