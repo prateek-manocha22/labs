@@ -156,3 +156,4 @@ If your score isn't what you expected, check the logs:
 ## 🆘 Where to Ask for Help
 -   Post in the `#labs-help` Discord channel.
 -   Check the `README.md` inside each lab folder for specific tips.
+
