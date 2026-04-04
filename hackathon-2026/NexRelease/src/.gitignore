@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Unit test / coverage reports
+.pytest_cache/
+test_results_*.json
+test_results.json
+
+# OS X junk
+.DS_Store
+credentials.json
+test_groq.py
+test_github.py
+*.json
+user_notifications/
+user_profiles.json
+whitelist.json
+processed_prs.json
+notifications.json
+ngrok.exe
+screenshots/
+.venv/

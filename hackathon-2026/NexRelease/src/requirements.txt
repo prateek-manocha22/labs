@@ -1,0 +1,6 @@
+gunicorn
+flask
+requests
+openai
+groq
+pytest
