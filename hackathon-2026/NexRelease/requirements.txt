@@ -1,0 +1,11 @@
+gunicorn
+flask
+requests
+openai
+groq
+pytest
+google-auth
+google-auth-oauthlib
+google-api-python-client
+python-dotenv
+

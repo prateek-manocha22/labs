@@ -1,7 +1,6 @@
 import requests
 import os
-from dotenv import load_dotenv
-load_dotenv()
+
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 def _headers():

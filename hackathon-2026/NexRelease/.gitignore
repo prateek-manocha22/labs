@@ -13,8 +13,6 @@ ENV/
 # Project specific
 data/
 outputs/
-screenshots/*.png
-!screenshots/main_ui.png
 
 # OS X junk
 .DS_Store

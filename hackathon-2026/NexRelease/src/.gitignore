@@ -26,5 +26,4 @@ whitelist.json
 processed_prs.json
 notifications.json
 ngrok.exe
-screenshots/
 .venv/

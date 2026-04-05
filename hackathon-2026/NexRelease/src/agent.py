@@ -11,8 +11,7 @@ from github_tool import get_pr_info
 from jira_tool import create_jira_ticket
 from slack_tool import post_slack_message
 from calendar_tool import create_calendar_event
-from dotenv import load_dotenv
-load_dotenv()
+
 # ── Groq client ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = OpenAI(

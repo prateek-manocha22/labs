@@ -6,9 +6,7 @@ from slack_tool import post_slack_message
 from calendar_tool import create_calendar_event, save_token
 import json, os, requests as req
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "nexrelease-secret-2026")
@@ -72,6 +70,22 @@ def save_profile(username, data):
     profiles[username.lower()] = data
     save_profiles(profiles)
 
+def get_user_jira(username):
+    profile = get_profile(username)
+    return {
+        "jira_domain":      profile.get("jira_domain", ""),
+        "jira_email":       profile.get("jira_email", ""),
+        "jira_api_token":   profile.get("jira_api_token", ""),
+        "jira_project_key": profile.get("jira_project_key", "KAN"),
+    }
+
+def get_user_slack(username):
+    profile = get_profile(username)
+    return {
+        "slack_token":   profile.get("slack_token", ""),
+        "slack_channel": profile.get("slack_channel", "releases"),
+    }
+
 def ensure_owner_whitelisted(repo):
     if not repo or "/" not in repo:
         return
@@ -107,7 +121,7 @@ def get_github_repos(access_token):
     )
     return [r["full_name"] for r in resp.json()] if resp.status_code == 200 else []
 
-def get_repo_prs(access_token, repo):
+def get_repo_prs_list(access_token, repo):
     resp = req.get(
         f"https://api.github.com/repos/{repo}/pulls?state=closed&per_page=20",
         headers={"Authorization": f"token {access_token}", "Accept": "application/json"}
@@ -117,7 +131,7 @@ def get_repo_prs(access_token, repo):
                 for p in resp.json() if p.get("merged_at")]
     return []
 
-# ── GitHub OAuth routes ────────────────────────────────────────────────────────
+# ── GitHub OAuth ───────────────────────────────────────────────────────────────
 @app.route("/oauth/login")
 def oauth_login():
     if not GITHUB_CLIENT_ID:
@@ -157,7 +171,7 @@ def oauth_callback():
         save_whitelist(members)
 
     profile = get_profile(github_user["login"])
-    if profile.get("jira") and profile.get("slack"):
+    if profile.get("jira_api_token") and profile.get("slack_token"):
         return redirect("/app")
     return redirect("/setup")
 
@@ -166,28 +180,22 @@ def oauth_logout():
     session.clear()
     return redirect("/")
 
-# ── Google Calendar OAuth routes ───────────────────────────────────────────────
+# ── Google Calendar OAuth ──────────────────────────────────────────────────────
 @app.route("/oauth/google")
 def google_oauth():
     try:
         from google_auth_oauthlib.flow import Flow
         if not os.path.exists("credentials.json"):
-            return jsonify({"error": "credentials.json not found. Please add it to your project folder."})
+            return jsonify({"error": "credentials.json not found."})
         flow = Flow.from_client_secrets_file(
             "credentials.json",
             scopes=["https://www.googleapis.com/auth/calendar"],
             redirect_uri="http://localhost:5000/oauth/google/callback"
         )
-        auth_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent"
-        )
+        auth_url, state = flow.authorization_url(access_type="offline", prompt="consent")
         with open("oauth_state.txt", "w") as f:
             f.write(state)
         return jsonify({"auth_url": auth_url})
-    except ImportError:
-        return jsonify({"error": "Google auth library not installed. Run: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
@@ -203,36 +211,14 @@ def google_oauth_callback():
             redirect_uri="http://localhost:5000/oauth/google/callback"
         )
         flow.fetch_token(authorization_response=request.url)
-        creds = flow.credentials
-        save_token(creds)
-        return """
-        <html><body style="background:#07080f;color:#e2e4f0;font-family:monospace;
-        display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-        <div style="text-align:center;">
-            <div style="font-size:48px;margin-bottom:16px;">✅</div>
-            <div style="font-size:20px;font-weight:bold;color:#0d9488;margin-bottom:8px;">Google Calendar Connected!</div>
-            <div style="color:#4a5080;font-size:13px;">Meeting events will now be created automatically.</div>
-            <div style="color:#4a5080;font-size:12px;margin-top:8px;">You can close this tab.</div>
-            <script>setTimeout(()=>window.close(),2500);</script>
-        </div>
-        </body></html>
-        """
+        save_token(flow.credentials)
+        return "<html><body style='background:#07080f;color:#0d9488;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;'><div style='text-align:center'><div style='font-size:48px'>✅</div><div style='font-size:20px;margin-top:16px'>Google Calendar Connected!</div><script>setTimeout(()=>window.close(),2000)</script></div></body></html>"
     except Exception as e:
-        return f"""
-        <html><body style="background:#07080f;color:#e2e4f0;font-family:monospace;
-        display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-        <div style="text-align:center;">
-            <div style="font-size:48px;margin-bottom:16px;">❌</div>
-            <div style="font-size:16px;color:#f43f5e;">Connection failed: {str(e)}</div>
-            <div style="color:#4a5080;font-size:12px;margin-top:8px;">Close this tab and try again.</div>
-        </div>
-        </body></html>
-        """
+        return f"<html><body style='background:#07080f;color:#f43f5e;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;'><div>❌ {str(e)}</div></body></html>"
 
 @app.route("/oauth/google/status")
 def google_oauth_status():
-    connected = os.path.exists("token.pickle")
-    return jsonify({"connected": connected})
+    return jsonify({"connected": os.path.exists("token.pickle")})
 
 # ── Landing ────────────────────────────────────────────────────────────────────
 @app.route("/")
@@ -245,7 +231,7 @@ def landing():
         "oauth_failed":      "GitHub authentication failed. Please try again.",
         "oauth_cancelled":   "Login was cancelled. Please try again.",
         "user_fetch_failed": "Could not retrieve your GitHub profile. Please try again.",
-        "no_oauth_config":   "OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in .env",
+        "no_oauth_config":   "OAuth is not configured on this server.",
     }
     error_text = error_messages.get(error, "")
     has_oauth  = bool(GITHUB_CLIENT_ID)
@@ -270,16 +256,15 @@ body::after{{content:'';position:fixed;inset:0;background-image:linear-gradient(
 .logo-text{{font-size:28px;font-weight:900;letter-spacing:-1px;}}
 .logo-text .nex{{color:transparent;background:linear-gradient(90deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
 .by-line{{font-family:var(--mono);font-size:11px;color:var(--muted2);margin-bottom:32px;}}
-h2{{font-size:22px;font-weight:800;margin-bottom:10px;letter-spacing:-0.5px;}}
+h2{{font-size:22px;font-weight:800;margin-bottom:10px;}}
 .sub{{font-size:14px;color:var(--muted2);line-height:1.7;margin-bottom:28px;}}
 .features{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:32px;text-align:left;}}
 .feat{{background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:8px;padding:10px 12px;font-family:var(--mono);font-size:10px;color:var(--muted2);}}
 .feat strong{{color:#a78bfa;display:block;margin-bottom:3px;}}
-.oauth-btn{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:15px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:var(--text);border:1px solid rgba(255,255,255,0.12);border-radius:12px;font-family:var(--sans);font-size:15px;font-weight:700;cursor:pointer;text-decoration:none;transition:transform 0.15s,box-shadow 0.2s,border-color 0.2s;margin-bottom:16px;}}
-.oauth-btn:hover{{transform:translateY(-2px);box-shadow:0 8px 28px rgba(0,0,0,0.4);border-color:rgba(255,255,255,0.25);}}
+.oauth-btn{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:15px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:var(--text);border:1px solid rgba(255,255,255,0.12);border-radius:12px;font-family:var(--sans);font-size:15px;font-weight:700;cursor:pointer;text-decoration:none;transition:transform 0.15s,box-shadow 0.2s;margin-bottom:16px;}}
+.oauth-btn:hover{{transform:translateY(-2px);box-shadow:0 8px 28px rgba(0,0,0,0.4);}}
 .github-icon{{width:22px;height:22px;fill:var(--text);flex-shrink:0;}}
-.no-oauth-box{{background:rgba(74,80,128,0.1);border:1px solid rgba(74,80,128,0.2);border-radius:10px;padding:16px;font-family:var(--mono);font-size:11px;color:var(--muted2);line-height:2;}}
-.error-box{{background:rgba(244,63,94,0.08);border:1px solid rgba(244,63,94,0.25);border-radius:8px;padding:12px 14px;font-family:var(--mono);font-size:11px;color:#f87171;margin-bottom:20px;text-align:left;}}
+.error-box{{background:rgba(244,63,94,0.08);border:1px solid rgba(244,63,94,0.25);border-radius:8px;padding:12px 14px;font-family:var(--mono);font-size:11px;color:#f87171;margin-bottom:20px;text-align:left;display:{"block" if error_text else "none"};}}
 .security-note{{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:18px;line-height:2;padding-top:18px;border-top:1px solid var(--border2);}}
 .security-note .ok{{color:var(--teal);}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(16px);}}to{{opacity:1;transform:translateY(0);}}}}
@@ -301,13 +286,8 @@ h2{{font-size:22px;font-weight:800;margin-bottom:10px;letter-spacing:-0.5px;}}
     <div class="feat"><strong>🔐 Security</strong>Detects unauthorized contributors</div>
   </div>
   {'<div class="error-box">⚠ ' + error_text + '</div>' if error_text else ''}
-  {'<a href="/oauth/login" class="oauth-btn"><svg class="github-icon" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>Continue with GitHub</a>' if has_oauth else '<div class="no-oauth-box">⚠️ GitHub OAuth not configured.<br>Add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET to your .env file.</div>'}
-  <div class="security-note">
-    <span class="ok">🔒 Secure authentication only.</span><br>
-    Login requires a verified GitHub account via GitHub OAuth.<br>
-    We never see or store your GitHub password.<br>
-    No username-only or email-only login is possible.
-  </div>
+  {'<a href="/oauth/login" class="oauth-btn"><svg class="github-icon" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>Continue with GitHub</a>' if has_oauth else '<div style="background:rgba(74,80,128,0.1);border:1px solid rgba(74,80,128,0.2);border-radius:10px;padding:16px;font-family:var(--mono);font-size:11px;color:var(--muted2);">⚠️ GitHub OAuth not configured.</div>'}
+  <div class="security-note"><span class="ok">🔒 Secure authentication only.</span><br>Login requires a verified GitHub account.<br>We never see or store your GitHub password.</div>
 </div>
 </body>
 </html>"""
@@ -320,11 +300,26 @@ def setup():
         return redirect("/")
 
     if request.method == "POST":
-        jira  = request.form.get("jira", "").strip()
-        slack = request.form.get("slack", "").strip()
-        if not jira or not slack:
+        jira_domain      = request.form.get("jira_domain", "").strip().replace("https://", "").replace("http://", "")
+        jira_email       = request.form.get("jira_email", "").strip()
+        jira_api_token   = request.form.get("jira_api_token", "").strip()
+        jira_project_key = request.form.get("jira_project_key", "KAN").strip() or "KAN"
+        slack_token      = request.form.get("slack_token", "").strip()
+        slack_channel    = request.form.get("slack_channel", "releases").strip() or "releases"
+
+        if not jira_domain or not jira_email or not jira_api_token or not slack_token:
             return redirect("/setup?error=missing")
-        save_profile(username, {"jira": jira, "slack": slack})
+
+        save_profile(username, {
+            "jira":              jira_email,
+            "jira_domain":       jira_domain,
+            "jira_email":        jira_email,
+            "jira_api_token":    jira_api_token,
+            "jira_project_key":  jira_project_key,
+            "slack":             slack_token,
+            "slack_token":       slack_token,
+            "slack_channel":     slack_channel,
+        })
         return redirect("/app")
 
     error        = request.args.get("error", "")
@@ -343,16 +338,14 @@ def setup():
 :root{{--bg:#07080f;--card:#121526;--surface:#0d0f1a;--border2:#252844;--accent:#7c3aed;--accent2:#0ea5e9;--teal:#0d9488;--rose:#f43f5e;--text:#e2e4f0;--muted:#4a5080;--muted2:#6b7199;--mono:'DM Mono',monospace;--sans:'Outfit',sans-serif;}}
 *{{margin:0;padding:0;box-sizing:border-box;}}
 body{{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}}
-body::before{{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 600px 400px at 20% 30%,rgba(124,58,237,0.07) 0%,transparent 70%);pointer-events:none;}}
-.card{{background:var(--card);border:1px solid var(--border2);border-radius:24px;padding:44px 40px;max-width:520px;width:100%;position:relative;overflow:hidden;animation:fadeUp 0.4s ease both;}}
+.card{{background:var(--card);border:1px solid var(--border2);border-radius:24px;padding:44px 40px;max-width:540px;width:100%;position:relative;overflow:hidden;animation:fadeUp 0.4s ease both;}}
 .card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(124,58,237,0.5),rgba(14,165,233,0.5),transparent);}}
 .user-bar{{display:flex;align-items:center;gap:12px;background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:10px;padding:12px 16px;margin-bottom:28px;}}
 .avatar{{width:38px;height:38px;border-radius:50%;border:2px solid rgba(124,58,237,0.3);}}
 .avatar-fallback{{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff;flex-shrink:0;}}
-.user-info{{flex:1;display:flex;flex-direction:column;gap:2px;}}
+.user-info{{flex:1;}}
 .user-name{{font-size:14px;font-weight:700;}}
 .user-email{{font-family:var(--mono);font-size:11px;color:var(--teal);}}
-.verified-badge{{font-family:var(--mono);font-size:9px;color:var(--teal);background:rgba(13,148,136,0.1);border:1px solid rgba(13,148,136,0.25);padding:3px 8px;border-radius:5px;white-space:nowrap;}}
 h2{{font-size:22px;font-weight:800;margin-bottom:8px;}}
 .sub{{font-size:13px;color:var(--muted2);line-height:1.6;margin-bottom:24px;}}
 .section-label{{font-family:var(--mono);font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:0.1em;margin:20px 0 10px;display:flex;align-items:center;gap:8px;}}
@@ -361,9 +354,10 @@ h2{{font-size:22px;font-weight:800;margin-bottom:8px;}}
 label{{font-family:var(--mono);font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:0.1em;}}
 input{{background:var(--surface);border:1px solid var(--border2);color:var(--text);padding:11px 14px;border-radius:9px;font-family:var(--mono);font-size:13px;outline:none;width:100%;transition:border-color 0.2s;}}
 input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1);}}
+.two-col{{display:grid;grid-template-columns:1fr 1fr;gap:12px;}}
 .hint{{background:rgba(14,165,233,0.05);border:1px solid rgba(14,165,233,0.15);border-radius:7px;padding:9px 12px;font-family:var(--mono);font-size:10px;color:#7dd3fc;margin-top:6px;line-height:1.8;}}
-.btn{{width:100%;padding:14px;background:linear-gradient(135deg,var(--accent),#6d28d9);color:#fff;border:none;border-radius:11px;font-family:var(--sans);font-size:15px;font-weight:700;cursor:pointer;transition:transform 0.15s,box-shadow 0.2s;box-shadow:0 4px 24px rgba(124,58,237,0.35);margin-top:16px;}}
-.btn:hover{{transform:translateY(-2px);box-shadow:0 8px 32px rgba(124,58,237,0.5);}}
+.btn{{width:100%;padding:14px;background:linear-gradient(135deg,var(--accent),#6d28d9);color:#fff;border:none;border-radius:11px;font-family:var(--sans);font-size:15px;font-weight:700;cursor:pointer;margin-top:16px;transition:transform 0.15s;}}
+.btn:hover{{transform:translateY(-2px);}}
 .error-box{{background:rgba(244,63,94,0.08);border:1px solid rgba(244,63,94,0.2);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:#f87171;margin-bottom:16px;display:{"block" if error else "none"};}}
 .logout-link{{font-family:var(--mono);font-size:11px;color:var(--muted2);text-align:center;margin-top:20px;}}
 .logout-link a{{color:var(--rose);text-decoration:none;}}
@@ -378,27 +372,47 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
       <div class="user-name">{github_name}</div>
       <div class="user-email">✓ {github_email}</div>
     </div>
-    <span class="verified-badge">GitHub Verified</span>
   </div>
   <h2>Connect Your Tools</h2>
-  <div class="sub">Link Jira and Slack — you can select your repo after logging in.</div>
-  <div class="error-box">Both fields are required.</div>
+  <div class="sub">Your credentials are stored privately — Jira tickets go to <strong>your</strong> Jira, not anyone else's.</div>
+  <div class="error-box">All required fields must be filled in.</div>
   <form method="POST">
-    <div class="section-label">Jira Integration</div>
+    <div class="section-label">Jira</div>
     <div class="form-group">
-      <label>Jira Account Email</label>
-      <input type="email" name="jira" placeholder="you@company.com" required/>
-      <div class="hint">Your Jira email for ticket creation. Get an API token at id.atlassian.com → Security → API tokens.</div>
+      <label>Jira Domain *</label>
+      <input type="text" name="jira_domain" placeholder="yourname.atlassian.net" required/>
+      <div class="hint">Just the domain — e.g. prateekmanocha22.atlassian.net</div>
     </div>
-    <div class="section-label">Slack Integration</div>
+    <div class="two-col">
+      <div class="form-group">
+        <label>Jira Email *</label>
+        <input type="email" name="jira_email" placeholder="you@email.com" value="{github_email}" required/>
+      </div>
+      <div class="form-group">
+        <label>Project Key</label>
+        <input type="text" name="jira_project_key" placeholder="KAN" value="KAN"/>
+      </div>
+    </div>
     <div class="form-group">
-      <label>Slack Bot Token</label>
-      <input type="text" name="slack" placeholder="xoxb-your-slack-bot-token" required/>
-      <div class="hint">Starts with xoxb-. Get it at api.slack.com → Your App → OAuth & Permissions.</div>
+      <label>Jira API Token *</label>
+      <input type="password" name="jira_api_token" placeholder="your Jira API token" required/>
+      <div class="hint">Get it at id.atlassian.com → Security → API tokens</div>
     </div>
+    <div class="section-label">Slack</div>
+    <div class="two-col">
+      <div class="form-group">
+        <label>Slack Bot Token *</label>
+        <input type="password" name="slack_token" placeholder="xoxb-..." required/>
+      </div>
+      <div class="form-group">
+        <label>Channel</label>
+        <input type="text" name="slack_channel" placeholder="releases" value="releases"/>
+      </div>
+    </div>
+    <div class="hint">Get Slack token at api.slack.com → Your App → OAuth & Permissions</div>
     <button type="submit" class="btn">🚀 Launch NexRelease Agent</button>
   </form>
-  <div class="logout-link"><a href="/oauth/logout">← Use a different GitHub account</a></div>
+  <div class="logout-link"><a href="/oauth/logout">← Use a different account</a></div>
 </div>
 </body>
 </html>"""
@@ -410,7 +424,7 @@ def main_app():
     if not username:
         return redirect("/")
     profile = get_profile(username)
-    if not profile.get("jira") or not profile.get("slack"):
+    if not profile.get("jira_api_token") or not profile.get("slack_token"):
         return redirect("/setup")
 
     github_name  = session.get("github_name", username)
@@ -427,7 +441,9 @@ def main_app():
 <title>NexRelease</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;600;700;800;900&display=swap" rel="stylesheet"/>
 <style>
-:root{{--bg:#07080f;--surface:#0d0f1a;--card:#121526;--card2:#161929;--border:#1e2240;--border2:#252844;--accent:#7c3aed;--accent2:#0ea5e9;--teal:#0d9488;--red:#dc2626;--rose:#f43f5e;--gold:#f59e0b;--text:#e2e4f0;--muted:#4a5080;--muted2:#6b7199;--mono:'DM Mono',monospace;--sans:'Outfit',sans-serif;}}
+:root {{
+  --bg:#07080f;--surface:#0d0f1a;--card:#121526;--card2:#161929;--border:#1e2240;--border2:#252844;--accent:#7c3aed;--accent2:#0ea5e9;--teal:#0d9488;--red:#dc2626;--rose:#f43f5e;--gold:#f59e0b;--text:#e2e4f0;--muted:#4a5080;--muted2:#6b7199;--mono:'DM Mono',monospace;--sans:'Outfit',sans-serif;
+}}
 *,*::before,*::after{{margin:0;padding:0;box-sizing:border-box;}}
 html{{scroll-behavior:smooth;}}
 body{{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}}
@@ -448,7 +464,7 @@ header{{display:flex;align-items:center;justify-content:space-between;padding:28
 .user-pill img{{width:18px;height:18px;border-radius:50%;}}
 .status-pill{{font-family:var(--mono);font-size:11px;padding:6px 12px;border-radius:20px;border:1px solid rgba(13,148,136,0.4);color:var(--teal);display:flex;align-items:center;gap:7px;background:rgba(13,148,136,0.06);}}
 .pulse-dot{{width:7px;height:7px;background:var(--teal);border-radius:50%;animation:pulse 2s infinite;}}
-.logout-btn{{font-family:var(--mono);font-size:10px;color:var(--rose);background:transparent;border:1px solid rgba(244,63,94,0.25);border-radius:6px;padding:5px 10px;cursor:pointer;text-decoration:none;transition:background 0.15s;}}
+.logout-btn{{font-family:var(--mono);font-size:10px;color:var(--rose);background:transparent;border:1px solid rgba(244,63,94,0.25);border-radius:6px;padding:5px 10px;cursor:pointer;text-decoration:none;}}
 .logout-btn:hover{{background:rgba(244,63,94,0.08);}}
 .hero{{margin-bottom:44px;}}
 .hero-eyebrow{{font-family:var(--mono);font-size:11px;color:var(--accent2);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:16px;display:flex;align-items:center;gap:10px;}}
@@ -474,7 +490,7 @@ header{{display:flex;align-items:center;justify-content:space-between;padding:28
 .repo-row{{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;}}
 .repo-group{{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px;}}
 .repo-group label,.field label{{font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;}}
-select{{background:var(--surface);border:1px solid var(--border2);color:var(--text);padding:10px 14px;border-radius:9px;font-family:var(--mono);font-size:13px;outline:none;width:100%;transition:border-color 0.2s;}}
+select{{background:var(--surface);border:1px solid var(--border2);color:var(--text);padding:10px 14px;border-radius:9px;font-family:var(--mono);font-size:13px;outline:none;width:100%;}}
 select:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.12);}}
 select option{{background:var(--surface);}}
 .field{{display:flex;flex-direction:column;gap:6px;}}
@@ -530,7 +546,6 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
 .sec-details{{font-family:var(--mono);font-size:11px;color:var(--muted2);background:rgba(220,38,38,0.06);border:1px solid rgba(220,38,38,0.2);border-radius:10px;padding:12px 14px;text-align:left;line-height:2.2;margin-bottom:4px;}}
 .sec-actions{{display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap;}}
 .sec-dismiss{{padding:10px 16px;background:transparent;color:var(--muted2);border:1px solid var(--border2);border-radius:9px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}}
-.sec-dismiss:hover{{background:var(--border2);color:var(--text);}}
 .sec-view{{padding:10px 16px;background:linear-gradient(135deg,var(--red),var(--rose));color:#fff;border:none;border-radius:9px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}}
 .sec-approve{{padding:10px 16px;background:rgba(13,148,136,0.15);color:var(--teal);border:1px solid rgba(13,148,136,0.35);border-radius:9px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}}
 .sec-whitelist{{padding:10px 16px;background:rgba(124,58,237,0.1);color:#a78bfa;border:1px solid rgba(124,58,237,0.25);border-radius:9px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}}
@@ -567,7 +582,6 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
 .feed-title{{font-family:var(--mono);font-size:10px;color:var(--accent2);text-transform:uppercase;letter-spacing:0.12em;display:flex;align-items:center;gap:8px;}}
 .live-dot{{width:6px;height:6px;background:var(--teal);border-radius:50%;animation:pulse 1.5s infinite;}}
 .clear-btn{{font-family:var(--mono);font-size:10px;color:var(--rose);background:transparent;border:1px solid rgba(244,63,94,0.25);border-radius:6px;padding:4px 10px;cursor:pointer;}}
-.clear-btn:hover{{background:rgba(244,63,94,0.08);}}
 .feed-list{{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;}}
 .feed-list::-webkit-scrollbar{{width:3px;}}.feed-list::-webkit-scrollbar-thumb{{background:var(--border2);border-radius:2px;}}
 .ncard{{background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:13px;cursor:pointer;transition:border-color 0.2s,transform 0.2s;animation:fadeUp 0.35s ease both;}}
@@ -592,7 +606,6 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
 .nb.purple{{background:rgba(124,58,237,0.12);color:#a78bfa;border:1px solid rgba(124,58,237,0.2);}}
 .nb.gold{{background:rgba(245,158,11,0.12);color:var(--gold);border:1px solid rgba(245,158,11,0.2);}}
 .more-btn{{width:100%;padding:6px;background:transparent;border:1px solid rgba(124,58,237,0.2);border-radius:7px;font-family:var(--mono);font-size:9px;color:#a78bfa;cursor:pointer;}}
-.more-btn:hover{{background:rgba(124,58,237,0.07);}}
 .ncard-actions{{display:flex;gap:5px;margin-top:7px;}}
 .approve-btn{{padding:5px 10px;background:rgba(13,148,136,0.15);color:var(--teal);border:1px solid rgba(13,148,136,0.3);border-radius:6px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;}}
 .whitelist-btn{{padding:5px 10px;background:rgba(124,58,237,0.1);color:#a78bfa;border:1px solid rgba(124,58,237,0.2);border-radius:6px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;}}
@@ -600,8 +613,7 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
 .team-section{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px 22px;margin-top:24px;position:relative;overflow:hidden;}}
 .team-section::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(14,165,233,0.3),rgba(124,58,237,0.3),transparent);}}
 .team-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:14px 0;}}
-.team-member{{background:var(--surface);border:1px solid var(--border2);border-radius:11px;padding:10px 14px;display:flex;align-items:center;gap:10px;transition:border-color 0.2s,transform 0.2s;}}
-.team-member:hover{{border-color:rgba(124,58,237,0.3);transform:translateX(3px);}}
+.team-member{{background:var(--surface);border:1px solid var(--border2);border-radius:11px;padding:10px 14px;display:flex;align-items:center;gap:10px;}}
 .member-avatar{{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0;}}
 .member-full-name{{font-size:13px;font-weight:600;color:var(--text);}}
 .team-footer{{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;padding-top:14px;border-top:1px solid var(--border);}}
@@ -642,7 +654,6 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
 <div class="layout">
   <div class="main-col">
     <div class="wrap">
-
       <header>
         <div class="logo">
           <div class="logo-row">
@@ -726,19 +737,12 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
         </div>
       </div>
 
-      <!-- GOOGLE CALENDAR PANEL -->
       <div class="panel">
         <div class="panel-title">📅 Google Calendar</div>
-        <p style="font-size:13px;color:var(--muted2);margin-bottom:18px;line-height:1.6;">
-          Connect your Google Calendar. The agent automatically creates meeting events when a PR is merged — no manual scheduling needed.
-        </p>
+        <p style="font-size:13px;color:var(--muted2);margin-bottom:18px;line-height:1.6;">Connect your Google Calendar for automatic meeting scheduling.</p>
         <div class="cal-status-row">
-          <div id="cal-status" style="font-family:var(--mono);font-size:12px;color:var(--muted);">
-            <span class="spin"></span> Checking...
-          </div>
-          <button class="secondary-btn" id="cal-connect-btn" onclick="connectCalendar()" style="display:none;">
-            Connect Google Calendar
-          </button>
+          <div id="cal-status" style="font-family:var(--mono);font-size:12px;color:var(--muted);"><span class="spin"></span> Checking...</div>
+          <button class="secondary-btn" id="cal-connect-btn" onclick="connectCalendar()" style="display:none;">Connect Google Calendar</button>
         </div>
       </div>
 
@@ -754,7 +758,6 @@ input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,0.1
         </div>
         <div class="team-footer">Team Schrodingers · Built with Groq AI · GitHub · Jira · Slack</div>
       </div>
-
     </div>
   </div>
 
@@ -785,64 +788,48 @@ function showToast(msg, type='ok', duration=6000) {{
 
 async function checkCalendarStatus() {{
   try {{
-    const res  = await fetch('/oauth/google/status');
+    const res = await fetch('/oauth/google/status');
     const data = await res.json();
     const status = document.getElementById('cal-status');
-    const btn    = document.getElementById('cal-connect-btn');
+    const btn = document.getElementById('cal-connect-btn');
     btn.style.display = 'inline-flex';
     if (data.connected) {{
-      status.innerHTML = '<span style="color:var(--teal);">✓ Google Calendar connected — meetings auto-created</span>';
-      btn.textContent  = 'Reconnect';
-      btn.style.borderColor = 'rgba(13,148,136,0.3)';
-      btn.style.color       = 'var(--teal)';
+      status.innerHTML = '<span style="color:var(--teal);">✓ Google Calendar connected</span>';
+      btn.textContent = 'Reconnect';
     }} else {{
-      status.innerHTML = '<span style="color:var(--muted);">Not connected — meetings will use calendar link fallback</span>';
-      btn.textContent  = 'Connect Google Calendar';
+      status.innerHTML = '<span style="color:var(--muted);">Not connected — using fallback</span>';
+      btn.textContent = 'Connect Google Calendar';
     }}
   }} catch(e) {{
-    document.getElementById('cal-status').innerHTML = '<span style="color:var(--muted);">Status unavailable</span>';
     document.getElementById('cal-connect-btn').style.display = 'inline-flex';
   }}
 }}
 
 async function connectCalendar() {{
-  const btn = document.getElementById('cal-connect-btn');
-  btn.disabled = true;
-  btn.textContent = 'Opening...';
-  try {{
-    const res  = await fetch('/oauth/google');
-    const data = await res.json();
-    if (data.auth_url) {{
-      const popup = window.open(data.auth_url, '_blank', 'width=500,height=650,scrollbars=yes');
-      showToast('Google OAuth opened — authorize in the popup window', 'ok', 8000);
-      const check = setInterval(async () => {{
-        if (popup && popup.closed) {{
-          clearInterval(check);
-          await checkCalendarStatus();
-        }}
-      }}, 1000);
-      setTimeout(() => {{ clearInterval(check); checkCalendarStatus(); }}, 60000);
-    }} else {{
-      showToast('Error: ' + (data.error || 'Unknown error'), 'threat', 8000);
-    }}
-  }} catch(e) {{
-    showToast('Failed to start OAuth: ' + e, 'threat');
+  const res = await fetch('/oauth/google');
+  const data = await res.json();
+  if (data.auth_url) {{
+    const popup = window.open(data.auth_url, '_blank', 'width=500,height=650');
+    showToast('Authorize in the popup window', 'ok', 8000);
+    const check = setInterval(async () => {{
+      if (popup && popup.closed) {{ clearInterval(check); checkCalendarStatus(); }}
+    }}, 1000);
+  }} else {{
+    showToast('Error: ' + (data.error || 'Unknown'), 'threat');
   }}
-  btn.disabled = false;
-  btn.textContent = 'Connect Google Calendar';
 }}
 
 checkCalendarStatus();
 
 async function onRepoChange() {{
   const repo = document.getElementById('repo-select').value;
-  const box  = document.getElementById('pr-suggestions');
+  const box = document.getElementById('pr-suggestions');
   document.getElementById('pr-number').value = '';
   if (!repo) {{ box.style.display='none'; return; }}
   box.style.display='block';
   box.innerHTML='<div class="pr-loading"><span class="spin"></span> Loading merged PRs...</div>';
   try {{
-    const res  = await fetch('/repo-prs?repo='+encodeURIComponent(repo));
+    const res = await fetch('/repo-prs?repo='+encodeURIComponent(repo));
     const data = await res.json();
     if (!data.prs || data.prs.length===0) {{
       box.innerHTML='<div class="pr-loading" style="color:var(--muted2)">No merged PRs found.</div>';
@@ -872,7 +859,7 @@ function showSecurityAlert(n, idx) {{
   document.getElementById('sec-modal-msg').textContent =
     `PR #${{n.pr_number}} "${{n.pr_title}}" — @${{n.author}} is not on your whitelist.`;
   document.getElementById('sec-modal-details').innerHTML =
-    `PR Number: &nbsp;#${{n.pr_number}}<br>Author: &nbsp;&nbsp;&nbsp;&nbsp;@${{n.author}}<br>Time: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${{n.time}}`;
+    `PR: #${{n.pr_number}}<br>Author: @${{n.author}}<br>Time: ${{n.time}}`;
   document.getElementById('sec-approve-btn').onclick = async () => {{
     dismissAlert();
     showToast('Approving PR...','ok');
@@ -929,6 +916,7 @@ function openDetail(index) {{
         ${{n.pr_url?`<a href="${{n.pr_url}}" target="_blank">${{n.pr_url}}</a>`:'<p>—</p>'}}</div></div>`;
   document.getElementById('detail-overlay').classList.add('open');
 }}
+
 async function approveNotif(index) {{
   closeDetailBtn();
   showToast('Approving...','ok');
@@ -944,7 +932,7 @@ function closeDetail(e){{if(e.target===document.getElementById('detail-overlay')
 function closeDetailBtn(){{document.getElementById('detail-overlay').classList.remove('open');}}
 
 async function loadNotifications() {{
-  const res  = await fetch('/notifications');
+  const res = await fetch('/notifications');
   const data = await res.json();
   allNotifications = data.notifications;
   renderFeed(allNotifications);
@@ -1129,11 +1117,11 @@ def current_user():
 
 @app.route("/repo-prs")
 def repo_prs():
-    repo         = request.args.get("repo","")
-    access_token = session.get("github_token","")
+    repo         = request.args.get("repo", "")
+    access_token = session.get("github_token", "")
     if not repo or not access_token:
-        return jsonify({"prs":[]})
-    return jsonify({"prs": get_repo_prs(access_token, repo)})
+        return jsonify({"prs": []})
+    return jsonify({"prs": get_repo_prs_list(access_token, repo)})
 
 @app.route("/notifications")
 def get_notifications():
@@ -1163,9 +1151,9 @@ def get_whitelist():
 @app.route("/whitelist/add", methods=["POST"])
 def add_to_whitelist():
     data     = request.get_json()
-    username = data.get("username","").strip()
+    username = data.get("username", "").strip()
     if not username:
-        return jsonify({"error":"empty"})
+        return jsonify({"error": "empty"})
     members = load_whitelist()
     if username.lower() not in [m.lower() for m in members]:
         members.append(username)
@@ -1187,56 +1175,69 @@ def approve():
     data     = request.get_json()
     index    = data.get("index")
     username = current_user()
+    jira_creds  = get_user_jira(username)
+    slack_creds = get_user_slack(username)
     notifications = load_notifications(username)
     if index is None or index >= len(notifications):
         return jsonify({"error": "invalid index"})
     n = notifications[index]
     try:
-        repo      = n.get("pr_url","").split("github.com/")[-1].split("/pull/")[0]
+        repo      = n.get("pr_url", "").split("github.com/")[-1].split("/pull/")[0]
         pr_number = n.get("pr_number", 1)
         pr_data   = get_pr_info(repo, pr_number)
         summary   = summarize_pr(pr_data)
         ticket    = create_jira_ticket(
             title=summary["jira_title"], description=summary["summary"],
-            checklist=summary["checklist"], risks=summary["risks"], pr_id=pr_number
+            checklist=summary["checklist"], risks=summary["risks"],
+            pr_id=pr_number, **jira_creds
         )
         slack_msg = f"""*PR Approved* — `{pr_data['title']}`
 *Author:* {pr_data['author']}
 {summary['slack_message']}
-*Jira:* {ticket.get('url','N/A')}
+*Jira:* {ticket.get('url', 'N/A')}
 *PR:* {pr_data['pr_url']}
 ⚠️ Author was not whitelisted but manually approved.""".strip()
-        slack_result = post_slack_message(slack_msg)
-        meeting      = create_calendar_event(
+        slack_result = post_slack_message(
+            slack_msg,
+            slack_token=slack_creds["slack_token"],
+            channel=slack_creds["slack_channel"]
+        )
+        meeting = create_calendar_event(
             meeting_title=summary["meeting_title"],
             pr_url=pr_data["pr_url"], risks=summary["risks"]
         )
         notifications[index].update({
-            "jira_url": ticket.get("url",""), "slack_posted": slack_result["success"],
+            "jira_url": ticket.get("url", ""), "slack_posted": slack_result["success"],
             "meeting": meeting["time"], "slack_message": slack_msg,
             "summary": summary["summary"], "checklist": summary["checklist"],
             "risks": summary["risks"], "pending": False
         })
         save_notifications(username, notifications)
-        return jsonify({"status":"approved"})
+        return jsonify({"status": "approved"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
 @app.route("/run")
 def run():
     pr_number = request.args.get("pr", 1, type=int)
-    repo      = request.args.get("repo","")
+    repo      = request.args.get("repo", "")
     username  = current_user()
+    jira_creds  = get_user_jira(username)
+    slack_creds = get_user_slack(username)
+
     if not repo:
         return jsonify({"error": "No repository selected"})
+
     ensure_owner_whitelisted(repo)
     members = load_whitelist()
     if username.lower() not in [m.lower() for m in members]:
         members.append(username)
         save_whitelist(members)
+
     try:
         pr_data  = get_pr_info(repo, pr_number)
         security = check_contributor(pr_data["author"])
+
         if security["status"] == "unauthorized":
             add_notification(
                 username=username, pr_number=pr_number,
@@ -1250,21 +1251,28 @@ def run():
             return jsonify({
                 "pr_title": pr_data["title"], "author": pr_data["author"],
                 "summary": "⚠️ Security alert — awaiting approval.",
-                "jira_url":"", "slack_posted":False, "meeting":"",
+                "jira_url": "", "slack_posted": False, "meeting": "",
                 "pr_url": pr_data["pr_url"], "security": security
             })
+
         summary = summarize_pr(pr_data)
         ticket  = create_jira_ticket(
             title=summary["jira_title"], description=summary["summary"],
-            checklist=summary["checklist"], risks=summary["risks"], pr_id=pr_number
+            checklist=summary["checklist"], risks=summary["risks"],
+            pr_id=pr_number, **jira_creds
         )
         slack_msg = f"""*New Release* — `{pr_data['title']}`
 *Author:* {pr_data['author']}
 *CI Status:* {pr_data['ci_status']}
 {summary['slack_message']}
-*Jira:* {ticket.get('url','N/A')}
+*Jira:* {ticket.get('url', 'N/A')}
 *PR:* {pr_data['pr_url']}""".strip()
-        slack_result = post_slack_message(slack_msg)
+
+        slack_result = post_slack_message(
+            slack_msg,
+            slack_token=slack_creds["slack_token"],
+            channel=slack_creds["slack_channel"]
+        )
         meeting = create_calendar_event(
             meeting_title=summary["meeting_title"],
             pr_url=pr_data["pr_url"], risks=summary["risks"]
@@ -1272,7 +1280,7 @@ def run():
         add_notification(
             username=username, pr_number=pr_number,
             pr_title=pr_data["title"], author=pr_data["author"],
-            jira_url=ticket.get("url",""), slack_posted=slack_result["success"],
+            jira_url=ticket.get("url", ""), slack_posted=slack_result["success"],
             meeting=meeting["time"], security=security,
             pr_url=pr_data["pr_url"], summary=summary["summary"],
             checklist=summary["checklist"], risks=summary["risks"],
@@ -1280,7 +1288,7 @@ def run():
         )
         return jsonify({
             "pr_title": pr_data["title"], "author": pr_data["author"],
-            "summary": summary["summary"], "jira_url": ticket.get("url",""),
+            "summary": summary["summary"], "jira_url": ticket.get("url", ""),
             "slack_posted": slack_result["success"], "meeting": meeting["time"],
             "pr_url": pr_data["pr_url"], "security": security
         })
@@ -1293,11 +1301,14 @@ def webhook():
     action    = data.get("action")
     pr        = data.get("pull_request", {})
     is_merged = pr.get("merged", False)
-    repo      = data.get("repository", {}).get("full_name","")
+    repo      = data.get("repository", {}).get("full_name", "")
     owner     = repo.split("/")[0] if "/" in repo else "unknown"
     ensure_owner_whitelisted(repo)
 
-    if action in ["opened","reopened"]:
+    jira_creds  = get_user_jira(owner)
+    slack_creds = get_user_slack(owner)
+
+    if action in ["opened", "reopened"]:
         pr_number = pr["number"]
         try:
             pr_data  = get_pr_info(repo, pr_number)
@@ -1312,9 +1323,9 @@ def webhook():
                     checklist="", risks="Review before merging.",
                     slack_message="", pending=True
                 )
-            return jsonify({"status":"security checked","pr":pr_number})
+            return jsonify({"status": "security checked", "pr": pr_number})
         except Exception as e:
-            return jsonify({"status":"error","message":str(e)})
+            return jsonify({"status": "error", "message": str(e)})
 
     if action == "closed" and is_merged:
         pr_number = pr["number"]
@@ -1331,17 +1342,23 @@ def webhook():
                     checklist="", risks="Review immediately.",
                     slack_message="", pending=True
                 )
-                return jsonify({"status":"security alert"})
+                return jsonify({"status": "security alert"})
+
             summary = summarize_pr(pr_data)
             ticket  = create_jira_ticket(
                 title=summary["jira_title"], description=summary["summary"],
-                checklist=summary["checklist"], risks=summary["risks"], pr_id=pr_number
+                checklist=summary["checklist"], risks=summary["risks"],
+                pr_id=pr_number, **jira_creds
             )
             slack_msg = f"""*PR Auto-processed* — `{pr_data['title']}`
 *Author:* {pr_data['author']}
 {summary['slack_message']}
-*Jira:* {ticket.get('url','N/A')}""".strip()
-            post_slack_message(slack_msg)
+*Jira:* {ticket.get('url', 'N/A')}""".strip()
+            post_slack_message(
+                slack_msg,
+                slack_token=slack_creds["slack_token"],
+                channel=slack_creds["slack_channel"]
+            )
             meeting = create_calendar_event(
                 meeting_title=summary["meeting_title"],
                 pr_url=pr_data["pr_url"], risks=summary["risks"]
@@ -1349,18 +1366,18 @@ def webhook():
             add_notification(
                 username=owner, pr_number=pr_number,
                 pr_title=pr_data["title"], author=pr_data["author"],
-                jira_url=ticket.get("url",""), slack_posted=True,
+                jira_url=ticket.get("url", ""), slack_posted=True,
                 meeting=meeting["time"], security=security,
                 pr_url=pr_data["pr_url"], summary=summary["summary"],
                 checklist=summary["checklist"], risks=summary["risks"],
                 slack_message=slack_msg, pending=False
             )
-            return jsonify({"status":"agent triggered","pr":pr_number})
+            return jsonify({"status": "agent triggered", "pr": pr_number})
         except Exception as e:
-            return jsonify({"status":"error","message":str(e)})
+            return jsonify({"status": "error", "message": str(e)})
 
-    return jsonify({"status":"ignored"})
+    return jsonify({"status": "ignored"})
 
 
 if __name__ == "__main__":
-    app.run(debug=True,port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
