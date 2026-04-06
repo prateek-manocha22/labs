@@ -2629,6 +2629,7 @@ def run():
     pr_number = request.args.get("pr", 1, type=int)
     repo      = request.args.get("repo", "")
     username  = current_user()
+    access_token = session.get("github_token", "")
     jira_creds  = get_user_jira(username)
     slack_creds = get_user_slack(username)
 
@@ -2642,7 +2643,7 @@ def run():
         save_whitelist(members)
 
     try:
-        pr_data  = get_pr_info(repo, pr_number)
+        pr_data  = get_pr_info(repo, pr_number, access_token)
         security = check_contributor(pr_data["author"])
 
         if security["status"] == "unauthorized":
