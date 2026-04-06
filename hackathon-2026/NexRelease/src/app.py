@@ -1391,7 +1391,7 @@
 
 
 
-#from flask import Flask, jsonify, request, redirect, session
+from flask import Flask, jsonify, request, redirect, session
 from github_tool import get_pr_info
 from claude_brain import summarize_pr, check_contributor, load_whitelist, save_whitelist
 from jira_tool import create_jira_ticket
