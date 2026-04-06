@@ -1391,7 +1391,7 @@
 
 
 
-from flask import Flask, jsonify, request, redirect, session
+#from flask import Flask, jsonify, request, redirect, session
 from github_tool import get_pr_info
 from claude_brain import summarize_pr, check_contributor, load_whitelist, save_whitelist
 from jira_tool import create_jira_ticket
@@ -1488,20 +1488,6 @@ def ensure_owner_whitelisted(repo):
         members.append(owner)
         save_whitelist(members)
 
-# Recently Updated — Step 1: new helper to find all users who have this repo configured
-def get_users_for_repo(repo):
-    """Find all users who have this repo configured."""
-    profiles = load_profiles()
-    users = []
-    for username, profile in profiles.items():
-        if profile.get("repo", "").lower() == repo.lower():
-            users.append(username)
-    # Always include the repo owner
-    owner = repo.split("/")[0].lower() if "/" in repo else ""
-    if owner and owner not in users:
-        users.append(owner)
-    return users if users else [owner]
-
 def get_github_user(access_token):
     resp = req.get(GITHUB_API_URL, headers={
         "Authorization": f"token {access_token}", "Accept": "application/json"
@@ -1577,7 +1563,11 @@ def oauth_callback():
         members.append(github_user["login"])
         save_whitelist(members)
 
+    # ── Save github_token to profile so webhook + approve can use it ──
     profile = get_profile(github_user["login"])
+    profile["github_token"] = access_token
+    save_profile(github_user["login"], profile)
+
     if profile.get("jira_api_token") and profile.get("slack_token"):
         return redirect("/app")
     return redirect("/setup")
@@ -1717,7 +1707,10 @@ def setup():
         if not jira_domain or not jira_email or not jira_api_token or not slack_token:
             return redirect("/setup?error=missing")
 
+        # ── Preserve github_token when saving setup profile ──
+        existing = get_profile(username)
         save_profile(username, {
+            **existing,
             "jira":              jira_email,
             "jira_domain":       jira_domain,
             "jira_email":        jira_email,
@@ -2522,6 +2515,10 @@ async function runAgent(){{
 def current_user():
     return session.get("github_username", "anonymous")
 
+def get_token_for_user(username):
+    """Get GitHub token — session first, fall back to saved profile."""
+    return session.get("github_token") or get_profile(username).get("github_token", "")
+
 @app.route("/repo-prs")
 def repo_prs():
     repo         = request.args.get("repo", "")
@@ -2582,8 +2579,9 @@ def approve():
     data     = request.get_json()
     index    = data.get("index")
     username = current_user()
-    jira_creds  = get_user_jira(username)
-    slack_creds = get_user_slack(username)
+    jira_creds   = get_user_jira(username)
+    slack_creds  = get_user_slack(username)
+    access_token = get_token_for_user(username)  # ← fixed
     notifications = load_notifications(username)
     if index is None or index >= len(notifications):
         return jsonify({"error": "invalid index"})
@@ -2591,7 +2589,7 @@ def approve():
     try:
         repo      = n.get("pr_url", "").split("github.com/")[-1].split("/pull/")[0]
         pr_number = n.get("pr_number", 1)
-        pr_data   = get_pr_info(repo, pr_number)
+        pr_data   = get_pr_info(repo, pr_number, access_token)  # ← fixed
         summary   = summarize_pr(pr_data)
         ticket    = create_jira_ticket(
             title=summary["jira_title"], description=summary["summary"],
@@ -2626,12 +2624,12 @@ def approve():
 
 @app.route("/run")
 def run():
-    pr_number = request.args.get("pr", 1, type=int)
-    repo      = request.args.get("repo", "")
-    username  = current_user()
-    access_token = session.get("github_token", "")
-    jira_creds  = get_user_jira(username)
-    slack_creds = get_user_slack(username)
+    pr_number    = request.args.get("pr", 1, type=int)
+    repo         = request.args.get("repo", "")
+    username     = current_user()
+    access_token = get_token_for_user(username)  # ← fixed
+    jira_creds   = get_user_jira(username)
+    slack_creds  = get_user_slack(username)
 
     if not repo:
         return jsonify({"error": "No repository selected"})
@@ -2643,7 +2641,7 @@ def run():
         save_whitelist(members)
 
     try:
-        pr_data  = get_pr_info(repo, pr_number, access_token)
+        pr_data  = get_pr_info(repo, pr_number, access_token)  # ← fixed
         security = check_contributor(pr_data["author"])
 
         if security["status"] == "unauthorized":
@@ -2710,31 +2708,28 @@ def webhook():
     pr        = data.get("pull_request", {})
     is_merged = pr.get("merged", False)
     repo      = data.get("repository", {}).get("full_name", "")
-    # Recently Updated — Step 2a: use lowercase owner and resolve all users to notify
-    owner = repo.split("/")[0].lower() if "/" in repo else "unknown"
-    users_to_notify = get_users_for_repo(repo)  # Recently Updated
+    owner     = repo.split("/")[0] if "/" in repo else "unknown"
     ensure_owner_whitelisted(repo)
 
-    jira_creds  = get_user_jira(owner)
-    slack_creds = get_user_slack(owner)
+    access_token = get_profile(owner).get("github_token", "")  # ← fixed
+    jira_creds   = get_user_jira(owner)
+    slack_creds  = get_user_slack(owner)
 
     if action in ["opened", "reopened"]:
         pr_number = pr["number"]
         try:
-            pr_data  = get_pr_info(repo, pr_number)
+            pr_data  = get_pr_info(repo, pr_number, access_token)  # ← fixed
             security = check_contributor(pr_data["author"])
             if security["status"] == "unauthorized":
-                # Recently Updated — Step 2b: notify all users, not just owner
-                for notify_user in users_to_notify:
-                    add_notification(
-                        username=notify_user, pr_number=pr_number,
-                        pr_title=pr_data["title"], author=pr_data["author"],
-                        jira_url="", slack_posted=False, meeting="",
-                        security=security, pr_url=pr_data["pr_url"],
-                        summary="⚠️ Unauthorized contributor opened a PR.",
-                        checklist="", risks="Review before merging.",
-                        slack_message="", pending=True
-                    )
+                add_notification(
+                    username=owner, pr_number=pr_number,
+                    pr_title=pr_data["title"], author=pr_data["author"],
+                    jira_url="", slack_posted=False, meeting="",
+                    security=security, pr_url=pr_data["pr_url"],
+                    summary="⚠️ Unauthorized contributor opened a PR.",
+                    checklist="", risks="Review before merging.",
+                    slack_message="", pending=True
+                )
             return jsonify({"status": "security checked", "pr": pr_number})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})
@@ -2742,20 +2737,18 @@ def webhook():
     if action == "closed" and is_merged:
         pr_number = pr["number"]
         try:
-            pr_data  = get_pr_info(repo, pr_number)
+            pr_data  = get_pr_info(repo, pr_number, access_token)  # ← fixed
             security = check_contributor(pr_data["author"])
             if security["status"] == "unauthorized":
-                # Recently Updated — Step 2c: notify all users on unauthorized merged PR
-                for notify_user in users_to_notify:
-                    add_notification(
-                        username=notify_user, pr_number=pr_number,
-                        pr_title=pr_data["title"], author=pr_data["author"],
-                        jira_url="", slack_posted=False, meeting="",
-                        security=security, pr_url=pr_data["pr_url"],
-                        summary="⚠️ Merged by unauthorized contributor.",
-                        checklist="", risks="Review immediately.",
-                        slack_message="", pending=True
-                    )
+                add_notification(
+                    username=owner, pr_number=pr_number,
+                    pr_title=pr_data["title"], author=pr_data["author"],
+                    jira_url="", slack_posted=False, meeting="",
+                    security=security, pr_url=pr_data["pr_url"],
+                    summary="⚠️ Merged by unauthorized contributor.",
+                    checklist="", risks="Review immediately.",
+                    slack_message="", pending=True
+                )
                 return jsonify({"status": "security alert"})
 
             summary = summarize_pr(pr_data)
@@ -2777,17 +2770,15 @@ def webhook():
                 meeting_title=summary["meeting_title"],
                 pr_url=pr_data["pr_url"], risks=summary["risks"]
             )
-            # Recently Updated — Step 2d: notify all users on successful merge
-            for notify_user in users_to_notify:
-                add_notification(
-                    username=notify_user, pr_number=pr_number,
-                    pr_title=pr_data["title"], author=pr_data["author"],
-                    jira_url=ticket.get("url", ""), slack_posted=True,
-                    meeting=meeting["time"], security=security,
-                    pr_url=pr_data["pr_url"], summary=summary["summary"],
-                    checklist=summary["checklist"], risks=summary["risks"],
-                    slack_message=slack_msg, pending=False
-                )
+            add_notification(
+                username=owner, pr_number=pr_number,
+                pr_title=pr_data["title"], author=pr_data["author"],
+                jira_url=ticket.get("url", ""), slack_posted=True,
+                meeting=meeting["time"], security=security,
+                pr_url=pr_data["pr_url"], summary=summary["summary"],
+                checklist=summary["checklist"], risks=summary["risks"],
+                slack_message=slack_msg, pending=False
+            )
             return jsonify({"status": "agent triggered", "pr": pr_number})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})
