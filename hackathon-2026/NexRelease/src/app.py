@@ -2920,6 +2920,10 @@ def get_user_slack(username):
         "slack_token":   profile.get("slack_token", ""),
         "slack_channel": profile.get("slack_channel", "releases"),
     }
+def get_user_github_token(username):
+    """Get stored GitHub token for a user (used in webhook where session is unavailable)."""
+    profile = get_profile(username)
+    return profile.get("github_token", "")
 
 def ensure_owner_whitelisted(repo):
     if not repo or "/" not in repo:
@@ -3006,6 +3010,9 @@ def oauth_callback():
         save_whitelist(members)
 
     profile = get_profile(github_user["login"])
+    profile["github_token"] = access_token
+    save_profile(github_user["login"], profile)
+
     if profile.get("jira_api_token") and profile.get("slack_token"):
         return redirect("/app")
     return redirect("/setup")
@@ -4017,7 +4024,8 @@ def approve():
     try:
         repo      = n.get("pr_url", "").split("github.com/")[-1].split("/pull/")[0]
         pr_number = n.get("pr_number", 1)
-        pr_data   = get_pr_info(repo, pr_number)
+        github_token = session.get("github_token", "")
+        pr_data  = get_pr_info(repo, pr_number, token=github_token)
         summary   = summarize_pr(pr_data)
         ticket    = create_jira_ticket(
             title=summary["jira_title"], description=summary["summary"],
@@ -4068,7 +4076,8 @@ def run():
         save_whitelist(members)
 
     try:
-        pr_data  = get_pr_info(repo, pr_number)
+        github_token = session.get("github_token", "")
+        pr_data  = get_pr_info(repo, pr_number, token=github_token)
         security = check_contributor(pr_data["author"])
 
         if security["status"] == "unauthorized":
@@ -4145,7 +4154,8 @@ def webhook():
     if action in ["opened", "reopened"]:
         pr_number = pr["number"]
         try:
-            pr_data  = get_pr_info(repo, pr_number)
+            github_token = session.get("github_token", "")
+            pr_data  = get_pr_info(repo, pr_number, token=github_token)
             security = check_contributor(pr_data["author"])
             if security["status"] == "unauthorized":
                 # Notify ALL setup users about the security threat
